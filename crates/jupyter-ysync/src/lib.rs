@@ -32,6 +32,7 @@
 pub mod convert;
 pub mod doc;
 pub mod error;
+pub mod protocol;
 
 #[cfg(feature = "python")]
 pub mod python;
@@ -39,6 +40,7 @@ pub mod python;
 pub use convert::{notebook_to_ydoc, ydoc_to_notebook};
 pub use doc::{cell_types, keys, NotebookDoc};
 pub use error::{Result, YSyncError};
+pub use protocol::{AwarenessState, ClientAwareness, Message, SyncMessage, SyncProtocol, SyncState};
 
 // Re-export for Python bindings
 #[cfg(feature = "python")]

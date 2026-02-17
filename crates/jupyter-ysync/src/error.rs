@@ -16,6 +16,9 @@ pub enum YSyncError {
 
     #[error("Y.Doc transaction error: {0}")]
     TransactionError(String),
+
+    #[error("Protocol error: {0}")]
+    ProtocolError(String),
 }
 
 pub type Result<T> = std::result::Result<T, YSyncError>;
