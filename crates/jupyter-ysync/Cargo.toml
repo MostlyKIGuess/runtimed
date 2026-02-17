@@ -23,12 +23,28 @@ thiserror = { workspace = true }
 base64 = { workspace = true }
 pyo3 = { version = "0.23", optional = true, features = ["extension-module"] }
 
+# Client dependencies (optional)
+async-tungstenite = { version = "0.32", features = ["tokio-runtime"], optional = true }
+tokio = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+jupyter-websocket-client = { path = "../jupyter-websocket-client" }
+futures = { workspace = true }
+
+[[example]]
+name = "live_edit"
+required-features = ["client"]
+
+[[example]]
+name = "execute_cell"
+required-features = ["client"]
 
 [features]
 default = []
 python = ["pyo3"]
+client = ["async-tungstenite", "tokio", "futures"]
 
 [package.metadata.docs.rs]
 all-features = true
