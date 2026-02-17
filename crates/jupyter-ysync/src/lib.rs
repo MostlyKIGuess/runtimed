@@ -34,6 +34,9 @@ pub mod doc;
 pub mod error;
 pub mod protocol;
 
+#[cfg(feature = "client")]
+pub mod client;
+
 #[cfg(feature = "python")]
 pub mod python;
 
@@ -41,6 +44,9 @@ pub use convert::{notebook_to_ydoc, ydoc_to_notebook};
 pub use doc::{cell_types, keys, NotebookDoc};
 pub use error::{Result, YSyncError};
 pub use protocol::{AwarenessState, ClientAwareness, Message, SyncMessage, SyncProtocol, SyncState};
+
+#[cfg(feature = "client")]
+pub use client::{build_room_url, ClientConfig, RoomId, YSyncClient};
 
 // Re-export for Python bindings
 #[cfg(feature = "python")]
