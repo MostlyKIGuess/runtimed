@@ -1,0 +1,38 @@
+[package]
+name = "jupyter-ysync"
+version = "0.1.0"
+edition = "2021"
+description = "Y-sync protocol implementation for Jupyter notebook collaboration"
+license = "BSD-3-Clause"
+repository = "https://github.com/runtimed/runtimed"
+keywords = ["jupyter", "crdt", "yjs", "collaboration"]
+categories = ["data-structures", "network-programming"]
+
+[lib]
+# cdylib needed for Python extension (built via maturin), lib for Rust usage
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+yrs = { workspace = true }
+nbformat = { workspace = true }
+jupyter-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+pyo3 = { version = "0.23", optional = true, features = ["extension-module"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[features]
+default = []
+python = ["pyo3"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs)'] }

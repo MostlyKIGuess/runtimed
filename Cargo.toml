@@ -6,6 +6,7 @@ members = [
     "crates/jupyter-serde",
     "crates/jupyter-websocket-client",
     "crates/jupyter-protocol",
+    "crates/jupyter-ysync",
     "crates/ollama-kernel",
     "crates/mybinder",
 ]
@@ -15,6 +16,7 @@ default-members = [
     "crates/jupyter-serde",
     "crates/jupyter-protocol",
     "crates/jupyter-websocket-client",
+    "crates/jupyter-ysync",
     "crates/mybinder",
 ]
 
@@ -38,6 +40,9 @@ runtimelib = { path = "crates/runtimelib", version = "1.2.0", default-features =
 jupyter-protocol = { path = "crates/jupyter-protocol", version = "1.2.0" }
 thiserror = "2"
 tokio = { version = "1.36.0", features = ["full"] }
+yrs = "0.21"
+dashmap = "6"
+nbformat = { path = "crates/nbformat", version = "1.0.0" }
 
 [profile.release]
 opt-level = 'z'
