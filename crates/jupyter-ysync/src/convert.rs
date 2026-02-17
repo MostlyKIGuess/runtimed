@@ -250,10 +250,7 @@ fn convert_ymap_to_cell<T: ReadTxn>(map: &MapRef, txn: &T) -> Result<Cell> {
             })
         }
         cell_types::MARKDOWN => {
-            let attachments = map.get(txn, keys::ATTACHMENTS).map(|v| {
-                let json = out_to_json(&v, txn);
-                json
-            });
+            let attachments = map.get(txn, keys::ATTACHMENTS).map(|v| out_to_json(&v, txn));
 
             Ok(Cell::Markdown {
                 id,
@@ -623,7 +620,7 @@ mod tests {
         let original = serde_json::json!({
             "string": "hello",
             "number": 42,
-            "float": 3.14,
+            "float": 1.5,
             "bool": true,
             "null": null,
             "array": [1, 2, 3],
