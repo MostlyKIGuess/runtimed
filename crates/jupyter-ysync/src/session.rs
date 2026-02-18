@@ -28,7 +28,7 @@
 
 use futures::{SinkExt, StreamExt};
 use jupyter_protocol::{ExecuteRequest, ExecutionState, JupyterMessage, JupyterMessageContent};
-use jupyter_websocket_client::{JupyterWebSocket, RemoteServer};
+use jupyter_websocket_client::{JupyterWebSocket, ProtocolMode, RemoteServer};
 use yrs::{Array, Map, Text, Transact};
 
 use crate::client::{build_room_url, ClientConfig, RoomId, YSyncClient};
@@ -98,6 +98,12 @@ pub struct NotebookSession {
     executor: CellExecutor,
     /// Session configuration
     config: SessionConfig,
+    /// Jupyter session ID (for kernel connection association)
+    session_id: Option<String>,
+    /// Whether we created the session (vs. found an existing one)
+    /// If we found an existing session (e.g., JupyterLab's), we should NOT
+    /// shut down the kernel when we close - that would kill JupyterLab's kernel.
+    owns_session: bool,
 }
 
 /// Kernel connection state.
@@ -121,6 +127,8 @@ impl NotebookSession {
         let file_id = Self::get_file_id(&config).await?;
 
         // Build room URL with file ID
+        // jupyter-server-documents uses format:contentType:file_id
+        // For notebooks, contentType is "notebook"
         let room_id = RoomId::new("json", "notebook", &file_id);
         let room_url = build_room_url(&config.base_url, &room_id, config.token.as_deref());
 
@@ -138,6 +146,8 @@ impl NotebookSession {
             kernel: None,
             executor: CellExecutor::new(),
             config,
+            session_id: None,
+            owns_session: false,
         })
     }
 
@@ -181,17 +191,27 @@ impl NotebookSession {
             token: self.config.token.clone().unwrap_or_default(),
         };
 
-        // Get or launch kernel
+        // Get or launch kernel (and session for association)
         let kernel_id = match kernel_id {
             Some(id) => id.to_string(),
-            None => self.launch_kernel(&server).await?,
+            None => {
+                let (session_id, kernel_id, created) = self.launch_kernel(&server).await?;
+                self.session_id = Some(session_id);
+                self.owns_session = created;
+                kernel_id
+            }
         };
 
-        // Connect to kernel WebSocket
+        // Connect to kernel WebSocket with session_id for proper association
+        // This tells the kernel manager that this connection belongs to a session,
+        // preventing premature kernel shutdown.
         let (kernel_ws, _response) = server
-            .connect_to_kernel(&kernel_id)
+            .connect_to_kernel_with_session(&kernel_id, self.session_id.as_deref())
             .await
             .map_err(|e| YSyncError::ProtocolError(format!("Failed to connect to kernel: {}", e)))?;
+
+        // Check if v1 binary protocol is being used (which sends IoPubWelcome)
+        let is_v1_protocol = kernel_ws.protocol_mode == ProtocolMode::BinaryV1;
 
         let (writer, reader) = kernel_ws.split();
 
@@ -201,17 +221,56 @@ impl NotebookSession {
             reader,
         });
 
-        // Wait for iopub_welcome to ensure IOPub channel is ready
-        self.wait_for_iopub_ready().await?;
+        // Wait for iopub_welcome only if using v1 binary protocol
+        // JSON/legacy protocol doesn't send this message
+        if is_v1_protocol {
+            self.wait_for_iopub_ready().await?;
+        }
 
         Ok(())
     }
 
-    /// Launch a new kernel and return its ID.
-    async fn launch_kernel(&self, server: &RemoteServer) -> Result<String> {
+    /// Find or create a session for the notebook.
+    ///
+    /// jupyter-server-documents uses the YDocSessionManager which links
+    /// sessions/kernels to Y.Doc rooms. Creating a session via the sessions API
+    /// (not the kernels API directly) ensures proper linkage.
+    ///
+    /// Returns (session_id, kernel_id, created) where:
+    /// - session_id: Used when connecting to kernel WebSocket
+    /// - kernel_id: The kernel to connect to
+    /// - created: true if we created a new session, false if we found an existing one
+    async fn launch_kernel(&self, server: &RemoteServer) -> Result<(String, String, bool)> {
         let client = reqwest::Client::new();
+        let sessions_url = format!("{}/api/sessions?token={}", server.base_url, server.token);
 
-        // Get default kernel name if not specified
+        #[derive(serde::Deserialize)]
+        struct Session {
+            id: String,
+            kernel: SessionKernel,
+            path: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct SessionKernel {
+            id: String,
+        }
+
+        // First, check for an existing session for this notebook
+        if let Ok(resp) = client.get(&sessions_url).send().await {
+            if let Ok(sessions) = resp.json::<Vec<Session>>().await {
+                for session in sessions {
+                    if session.path.as_deref() == Some(&self.config.notebook_path) {
+                        // Found existing session (e.g., JupyterLab's) - don't own it
+                        return Ok((session.id, session.kernel.id, false));
+                    }
+                }
+            }
+        }
+
+        // No existing session - create one via the sessions API
+        // This is CRITICAL: YDocSessionManager intercepts session creation
+        // and links the kernel to the YRoom. Using /api/kernels directly
+        // creates orphan kernels not linked to the Y.Doc.
         let kernel_name = match &self.config.kernel_name {
             Some(name) => name.clone(),
             None => {
@@ -231,43 +290,78 @@ impl NotebookSession {
             }
         };
 
-        // Launch kernel
-        let url = format!("{}/api/kernels?token={}", server.base_url, server.token);
-        let launch_req = jupyter_websocket_client::KernelLaunchRequest {
-            name: kernel_name,
-            path: Some(self.config.notebook_path.clone()),
+        // Create session via POST /api/sessions (triggers YDocSessionManager)
+        #[derive(serde::Serialize)]
+        struct CreateSessionRequest {
+            path: String,
+            name: String,
+            #[serde(rename = "type")]
+            session_type: String,
+            kernel: KernelSpec,
+        }
+        #[derive(serde::Serialize)]
+        struct KernelSpec {
+            name: String,
+        }
+
+        let create_req = CreateSessionRequest {
+            path: self.config.notebook_path.clone(),
+            name: self.config.notebook_path.clone(),
+            session_type: "notebook".to_string(),
+            kernel: KernelSpec { name: kernel_name },
         };
 
-        let kernel: jupyter_websocket_client::Kernel = client
-            .post(&url)
-            .json(&launch_req)
+        let session: Session = client
+            .post(&sessions_url)
+            .json(&create_req)
             .send()
             .await
-            .map_err(|e| YSyncError::ProtocolError(format!("Failed to launch kernel: {}", e)))?
+            .map_err(|e| YSyncError::ProtocolError(format!("Failed to create session: {}", e)))?
             .json()
             .await
-            .map_err(|e| YSyncError::ProtocolError(format!("Failed to parse kernel response: {}", e)))?;
+            .map_err(|e| YSyncError::ProtocolError(format!("Failed to parse session response: {}", e)))?;
 
-        Ok(kernel.id)
+        // We created this session, so we own it
+        Ok((session.id, session.kernel.id, true))
     }
 
     /// Wait for the IOPub channel to be ready.
+    ///
+    /// Waits for `IoPubWelcome` message or times out after receiving other messages.
+    /// Some servers may not send IoPubWelcome, so we proceed after a timeout.
     async fn wait_for_iopub_ready(&mut self) -> Result<()> {
         let kernel = self.kernel.as_mut().ok_or_else(|| {
             YSyncError::ProtocolError("No kernel connected".into())
         })?;
 
-        while let Some(response) = kernel.reader.next().await {
-            let msg = response.map_err(|e| {
-                YSyncError::ProtocolError(format!("Kernel message error: {}", e))
-            })?;
+        // Wait for first few messages to check for IoPubWelcome
+        // If we get other messages (like status), assume the channel is ready
+        for _ in 0..3 {
+            let recv_future = kernel.reader.next();
+            let timeout_duration = tokio::time::Duration::from_millis(500);
 
-            if matches!(&msg.content, JupyterMessageContent::IoPubWelcome(_)) {
-                return Ok(());
+            match tokio::time::timeout(timeout_duration, recv_future).await {
+                Ok(Some(Ok(msg))) => {
+                    if matches!(&msg.content, JupyterMessageContent::IoPubWelcome(_)) {
+                        return Ok(());
+                    }
+                    // Got another message type - channel is working, continue checking
+                }
+                Ok(Some(Err(e))) => {
+                    return Err(YSyncError::ProtocolError(format!("Kernel message error: {}", e)));
+                }
+                Ok(None) => {
+                    return Err(YSyncError::ProtocolError("Connection closed".into()));
+                }
+                Err(_) => {
+                    // Timeout - no IoPubWelcome but that's OK for some servers
+                    return Ok(());
+                }
             }
         }
 
-        Err(YSyncError::ProtocolError("Connection closed before IOPub ready".into()))
+        // Received messages but no IoPubWelcome - channel is working
+        Ok(())
     }
 
     /// Get a reference to the notebook document.
@@ -436,34 +530,55 @@ impl NotebookSession {
         self.kernel.as_ref().map(|k| k.kernel_id.as_str())
     }
 
+    /// Get the session ID if a session has been created/found.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
     /// Check if a kernel is connected.
     pub fn has_kernel(&self) -> bool {
         self.kernel.is_some()
     }
 
-    /// Shutdown the kernel.
+    /// Shutdown the kernel and session if we own it.
+    ///
+    /// If we found and reused an existing session (e.g., JupyterLab's), we don't
+    /// shut down the kernel - that would destroy JupyterLab's kernel and all
+    /// execution state.
     pub async fn shutdown_kernel(&mut self) -> Result<()> {
-        if let Some(kernel) = self.kernel.take() {
-            let client = reqwest::Client::new();
-            let url = format!(
-                "{}/api/kernels/{}?token={}",
-                self.config.base_url,
-                kernel.kernel_id,
-                self.config.token.as_deref().unwrap_or("")
-            );
+        // Always drop our kernel connection
+        let _kernel = self.kernel.take();
 
-            client
-                .delete(&url)
-                .send()
-                .await
-                .map_err(|e| YSyncError::ProtocolError(format!("Failed to shutdown kernel: {}", e)))?;
+        // Only delete the session/kernel if we created it
+        if self.owns_session {
+            if let Some(session_id) = self.session_id.take() {
+                let client = reqwest::Client::new();
+
+                // Delete the session (which also cleans up the kernel)
+                let url = format!(
+                    "{}/api/sessions/{}?token={}",
+                    self.config.base_url,
+                    session_id,
+                    self.config.token.as_deref().unwrap_or("")
+                );
+
+                // Best effort - don't fail if cleanup fails
+                let _ = client.delete(&url).send().await;
+            }
         }
         Ok(())
     }
 
     /// Close the session, shutting down the kernel and disconnecting.
+    ///
+    /// This includes a brief delay to allow the server to process any pending
+    /// sync updates before the WebSocket connection is closed.
     pub async fn close(mut self) -> Result<()> {
         self.shutdown_kernel().await?;
+        // Brief delay to allow server to process pending updates
+        // This works around a race condition in jupyter-server-documents where
+        // the server may still be processing our last update when we disconnect
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         self.ysync_client.close().await?;
         Ok(())
     }
