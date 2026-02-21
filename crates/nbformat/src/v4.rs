@@ -1,8 +1,8 @@
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use uuid::Uuid;
 
-use jupyter_protocol::{media::serialize_media_for_notebook, media::Media, ExecutionCount};
+use jupyter_protocol::{ExecutionCount, media::Media, media::serialize_media_for_notebook};
 
 use core::fmt;
 use std::{
@@ -147,7 +147,7 @@ pub struct Notebook {
     pub cells: Vec<Cell>,
 }
 
-#[derive(Clone, Deserialize, Serialize, Debug)]
+#[derive(Clone, Deserialize, Serialize, Debug, Default)]
 pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kernelspec: Option<KernelSpec>,

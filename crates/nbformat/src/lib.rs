@@ -1,4 +1,5 @@
 pub mod legacy;
+pub mod v3;
 pub mod v4;
 
 use serde::Serialize as _;
@@ -18,6 +19,7 @@ pub enum NotebookError {
 pub enum Notebook {
     V4(v4::Notebook),
     Legacy(legacy::Notebook),
+    V3(v3::Notebook),
 }
 
 pub fn parse_notebook(json: &str) -> Result<Notebook, NotebookError> {
@@ -30,6 +32,7 @@ pub fn parse_notebook(json: &str) -> Result<Notebook, NotebookError> {
         (4, 0) | (4, 1) | (4, 2) | (4, 3) | (4, 4) => Ok(Notebook::Legacy(
             serde_json::from_value::<legacy::Notebook>(value)?,
         )),
+        (3, _) => Ok(Notebook::V3(serde_json::from_value::<v3::Notebook>(value)?)),
         _ => Err(NotebookError::UnsupportedVersion(nbformat, nbformat_minor)),
     }
 }
@@ -54,6 +57,10 @@ pub fn serialize_notebook(notebook: &Notebook) -> Result<String, NotebookError> 
         Notebook::Legacy(notebook) => Err(NotebookError::UnsupportedVersion(
             notebook.nbformat,
             notebook.nbformat_minor,
+        )),
+        Notebook::V3(notebook) => Err(NotebookError::UnsupportedVersion(
+            notebook.nbformat,
+            notebook.nbformat_minor.unwrap_or(0),
         )),
     }
 }
@@ -113,4 +120,207 @@ pub fn upgrade_legacy_notebook(legacy_notebook: legacy::Notebook) -> anyhow::Res
         nbformat: 4,
         nbformat_minor: 5,
     })
+}
+
+pub fn upgrade_v3_notebook(v3_notebook: v3::Notebook) -> anyhow::Result<v4::Notebook> {
+    let mut all_cells: Vec<v3::Cell> = Vec::new();
+
+    if let Some(worksheets) = v3_notebook.worksheets {
+        for worksheet in worksheets {
+            all_cells.extend(worksheet.cells);
+        }
+    }
+
+    let cells: Vec<v4::Cell> = all_cells
+        .into_iter()
+        .map(|cell: v3::Cell| match cell {
+            v3::Cell::Heading {
+                level,
+                metadata,
+                source,
+            } => {
+                let heading_prefix = "#".repeat(level as usize);
+                // v3 heading source lines are plain text with no markdown prefix.
+                // Join them into a single line and prepend the heading marker once.
+                let joined = source.join("");
+                let new_source = if joined.trim().is_empty() {
+                    vec![format!("{}", heading_prefix)]
+                } else {
+                    vec![format!("{} {}", heading_prefix, joined)]
+                };
+                v4::Cell::Markdown {
+                    id: uuid::Uuid::new_v4().into(),
+                    metadata,
+                    source: new_source,
+                    attachments: None,
+                }
+            }
+            v3::Cell::Markdown {
+                metadata,
+                source,
+                attachments,
+            } => v4::Cell::Markdown {
+                id: uuid::Uuid::new_v4().into(),
+                metadata,
+                source,
+                attachments,
+            },
+            v3::Cell::Code {
+                metadata,
+                prompt_number,
+                input,
+                language: _,
+                outputs,
+            } => v4::Cell::Code {
+                id: uuid::Uuid::new_v4().into(),
+                metadata,
+                execution_count: prompt_number,
+                source: input.unwrap_or_default(),
+                outputs: outputs.into_iter().map(convert_v3_output).collect(),
+            },
+            v3::Cell::Raw { metadata, source } => v4::Cell::Raw {
+                id: uuid::Uuid::new_v4().into(),
+                metadata,
+                source,
+            },
+        })
+        .collect();
+
+    // All v3 cells are assigned fresh UUIDs above, so duplicate IDs cannot occur.
+
+    let metadata = convert_v3_metadata(v3_notebook.metadata.as_ref());
+
+    Ok(v4::Notebook {
+        cells,
+        metadata,
+        nbformat: 4,
+        nbformat_minor: 5,
+    })
+}
+
+fn convert_v3_metadata(v3_metadata: Option<&serde_json::Value>) -> v4::Metadata {
+    let mut metadata = v4::Metadata::default();
+
+    if let Some(v3_metadata) = v3_metadata {
+        if let Some(obj) = v3_metadata.as_object() {
+            // Extract language from language_info first so we can use it in kernelspec.
+            let language = obj
+                .get("language_info")
+                .and_then(|li| li.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            if let Some(kernel_info) = obj.get("kernel_info") {
+                if let Some(name) = kernel_info.get("name").and_then(|v| v.as_str()) {
+                    metadata.kernelspec = Some(v4::KernelSpec {
+                        display_name: name.to_string(),
+                        name: name.to_string(),
+                        // Use the actual language from language_info rather than
+                        // assuming Python.
+                        language: language.clone(),
+                        additional: std::collections::HashMap::new(),
+                    });
+                }
+            }
+
+            if let Some(language_info) = obj.get("language_info") {
+                if let Some(name) = language_info.get("name").and_then(|v| v.as_str()) {
+                    let version = language_info
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    metadata.language_info = Some(v4::LanguageInfo {
+                        name: name.to_string(),
+                        version,
+                        codemirror_mode: None,
+                        additional: std::collections::HashMap::new(),
+                    });
+                }
+            }
+
+            for (key, value) in obj {
+                if key != "kernel_info" && key != "language_info" {
+                    metadata.additional.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+
+    metadata
+}
+
+fn convert_v3_output(v3_output: v3::Output) -> v4::Output {
+    match v3_output {
+        v3::Output::Stream { name, stream, text } => v4::Output::Stream {
+            name: name.unwrap_or_else(|| stream.unwrap_or_else(|| "stdout".to_string())),
+            text: v4::MultilineString(text.join("")),
+        },
+        v3::Output::PyOut {
+            prompt_number,
+            text,
+            html,
+            metadata: _,
+        } => {
+            let mut data = Vec::new();
+            if !text.is_empty() {
+                data.push(jupyter_protocol::media::MediaType::Plain(text.join("")));
+            }
+            if let Some(html) = html {
+                if !html.is_empty() {
+                    data.push(jupyter_protocol::media::MediaType::Html(html.join("")));
+                }
+            }
+            v4::Output::ExecuteResult(v4::ExecuteResult {
+                execution_count: jupyter_protocol::ExecutionCount::new(
+                    prompt_number.unwrap_or(1) as usize
+                ),
+                data: jupyter_protocol::media::Media::new(data),
+                metadata: serde_json::Map::new(),
+            })
+        }
+        v3::Output::DisplayData { data, metadata: _ } => {
+            let media_vec = if let Some(obj) = data.as_object() {
+                obj.iter()
+                    .filter_map(|(k, v)| {
+                        // v3 data values are either a plain string or an array of strings;
+                        // join all lines rather than taking only the first element.
+                        let content = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Array(arr) => arr
+                                .iter()
+                                .filter_map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(""),
+                            _ => return None,
+                        };
+                        let media_type = match k.as_str() {
+                            "png" => jupyter_protocol::media::MediaType::Png(content),
+                            "jpeg" => jupyter_protocol::media::MediaType::Jpeg(content),
+                            "text" => jupyter_protocol::media::MediaType::Plain(content),
+                            _ => jupyter_protocol::media::MediaType::Other((
+                                k.clone(),
+                                serde_json::Value::String(content),
+                            )),
+                        };
+                        Some(media_type)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            v4::Output::DisplayData(v4::DisplayData {
+                data: jupyter_protocol::media::Media::new(media_vec),
+                metadata: serde_json::Map::new(),
+            })
+        }
+        v3::Output::PyErr {
+            ename,
+            evalue,
+            traceback,
+        } => v4::Output::Error(v4::ErrorOutput {
+            ename: ename.unwrap_or_default(),
+            evalue: evalue.unwrap_or_default(),
+            traceback,
+        }),
+    }
 }

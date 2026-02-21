@@ -2,7 +2,7 @@
 mod test {
     use nbformat::legacy::Cell as LegacyCell;
     use nbformat::v4::{Cell, CellId, Output};
-    use nbformat::{parse_notebook, serialize_notebook, Notebook};
+    use nbformat::{Notebook, parse_notebook, serialize_notebook};
     use serde_json::Value;
     use std::fs;
     use std::path::Path;
@@ -141,6 +141,9 @@ mod test {
                 let notebook = parse_notebook(&notebook_json);
 
                 println!("Parsing notebook: {}", path_str);
+                if let Err(ref e) = notebook {
+                    println!("Error for {}: {:?}", path_str, e);
+                }
                 if path_str.contains("invalid_cell_id") || path_str.contains("invalid_metadata") {
                     assert!(
                         matches!(notebook, Err(nbformat::NotebookError::JsonError(_))),
@@ -148,7 +151,6 @@ mod test {
                         path_str
                     );
                 } else if path_str.starts_with("tests/notebooks/test2")
-                    || path_str.starts_with("tests/notebooks/test3")
                     || path_str.starts_with("tests/notebooks/test4plus")
                     || path_str.starts_with("tests/notebooks/invalid")
                     || path_str.starts_with("tests/notebooks/no_min_version")
@@ -473,6 +475,7 @@ mod test {
                 }
             }
             Notebook::Legacy(_) => panic!("Expected V4 notebook, got legacy"),
+            Notebook::V3(_) => panic!("Expected V4 notebook, got v3"),
         }
 
         let serialized = serialize_notebook(&notebook).expect("Failed to serialize notebook");
@@ -563,6 +566,7 @@ mod test {
                 }
             }
             Notebook::Legacy(_) => panic!("Expected V4 notebook, got legacy"),
+            Notebook::V3(_) => panic!("Expected V4 notebook, got v3"),
         }
     }
 
@@ -609,22 +613,23 @@ mod test {
                 if let Cell::Markdown { source, .. } = &notebook.cells[0] {
                     assert_eq!(
                         source,
-                        &vec!["# Array format\n".to_string(), "This is the array format.".to_string()]
+                        &vec![
+                            "# Array format\n".to_string(),
+                            "This is the array format.".to_string()
+                        ]
                     );
                 } else {
                     panic!("Expected markdown cell");
                 }
 
                 if let Cell::Code { source, .. } = &notebook.cells[1] {
-                    assert_eq!(
-                        source,
-                        &vec!["# String format\nprint('hello')".to_string()]
-                    );
+                    assert_eq!(source, &vec!["# String format\nprint('hello')".to_string()]);
                 } else {
                     panic!("Expected code cell");
                 }
             }
             Notebook::Legacy(_) => panic!("Expected V4 notebook, got legacy"),
+            Notebook::V3(_) => panic!("Expected V4 notebook, got v3"),
         }
     }
 }
