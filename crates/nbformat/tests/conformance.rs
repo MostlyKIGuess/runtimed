@@ -251,9 +251,7 @@ mod test {
         // std::fs::write("og.json", &notebook_json).expect("Failed to write original JSON");
         // std::fs::write("ser.json", &serialized).expect("Failed to write serialized JSON");
 
-        // Right now, this Mediatypes notebook has two outputs with a differing newline at the end
-        // between the original and the serialized.
-        // assert_eq!(notebook_json, serialized);
+        assert_eq!(notebook_json, serialized);
     }
 
     #[test]
@@ -495,6 +493,69 @@ mod test {
     }
 
     #[test]
+    fn test_pandas_notebook_roundtrip() {
+        let notebook_json = read_notebook("tests/notebooks/pandas_basic.ipynb");
+        let notebook = parse_notebook(&notebook_json).expect("Failed to parse pandas notebook");
+
+        // Verify structure
+        let nb = if let Notebook::V4(ref nb) = notebook {
+            nb
+        } else {
+            panic!("Expected V4 notebook");
+        };
+
+        assert_eq!(nb.nbformat, 4);
+        assert_eq!(nb.nbformat_minor, 5);
+        assert_eq!(nb.cells.len(), 4);
+
+        // Cell 0: import pandas as pd
+        assert!(matches!(&nb.cells[0], Cell::Code { source, outputs, execution_count: Some(1), .. } if source == &vec!["import pandas as pd"] && outputs.is_empty()));
+
+        // Cell 1: create DataFrame and display
+        if let Cell::Code { source, outputs, execution_count: Some(2), .. } = &nb.cells[1] {
+            assert_eq!(source.len(), 6); // 6 lines of source
+            assert_eq!(outputs.len(), 1);
+            assert!(matches!(&outputs[0], Output::ExecuteResult(_)));
+        } else {
+            panic!("Expected code cell with execution_count 2");
+        }
+
+        // Cell 2: df
+        if let Cell::Code { source, outputs, execution_count: Some(3), .. } = &nb.cells[2] {
+            assert_eq!(source, &vec!["df"]);
+            assert_eq!(outputs.len(), 1);
+            assert!(matches!(&outputs[0], Output::ExecuteResult(_)));
+        } else {
+            panic!("Expected code cell with execution_count 3");
+        }
+
+        // Cell 3: df.describe()
+        if let Cell::Code { source, outputs, execution_count: Some(4), .. } = &nb.cells[3] {
+            assert_eq!(source, &vec!["df.describe()"]);
+            assert_eq!(outputs.len(), 1);
+            assert!(matches!(&outputs[0], Output::ExecuteResult(_)));
+        } else {
+            panic!("Expected code cell with execution_count 4");
+        }
+
+        // First roundtrip: serialize and compare byte-for-byte
+        let serialized = serialize_notebook(&notebook).expect("Failed to serialize notebook");
+        assert_eq!(
+            notebook_json, serialized,
+            "First roundtrip: serialized output does not match original"
+        );
+
+        // Second roundtrip: parse the serialized output, serialize again
+        let notebook2 = parse_notebook(&serialized).expect("Failed to parse serialized notebook");
+        let serialized2 =
+            serialize_notebook(&notebook2).expect("Failed to serialize notebook a second time");
+        assert_eq!(
+            notebook_json, serialized2,
+            "Second roundtrip: re-serialized output does not match original"
+        );
+    }
+
+    #[test]
     fn test_parse_notebook_with_string_source() {
         let notebook_json = r###"{
  "cells": [
@@ -631,5 +692,77 @@ mod test {
             Notebook::Legacy(_) => panic!("Expected V4 notebook, got legacy"),
             Notebook::V3(_) => panic!("Expected V4 notebook, got v3"),
         }
+    }
+
+    #[test]
+    fn test_stream_output_roundtrip() {
+        // Test round-tripping stream output through serialize/deserialize,
+        // which exercises MultilineString with the proper custom deserializer.
+        let cases = vec![
+            ("trailing newline", "hello\n"),
+            ("no trailing newline", "hello"),
+            ("multi-line with trailing", "line1\nline2\n"),
+            ("multi-line no trailing", "line1\nline2"),
+            ("empty string", ""),
+            ("single newline", "\n"),
+            ("multiple trailing newlines", "hello\n\n"),
+        ];
+
+        for (label, input) in cases {
+            let output = Output::Stream {
+                name: "stdout".to_string(),
+                text: nbformat::v4::MultilineString(input.to_string()),
+            };
+            let serialized = serde_json::to_string(&output)
+                .unwrap_or_else(|e| panic!("{label}: serialize failed: {e}"));
+            let deserialized: Output = serde_json::from_str(&serialized)
+                .unwrap_or_else(|e| panic!("{label}: deserialize failed: {e}"));
+            if let Output::Stream { text, .. } = deserialized {
+                assert_eq!(
+                    text.0, input,
+                    "{label}: roundtrip mismatch — input={input:?}, serialized={serialized}, got={:?}",
+                    text.0
+                );
+            } else {
+                panic!("{label}: expected Stream output after roundtrip");
+            }
+        }
+    }
+
+    #[test]
+    fn test_multiline_string_preserves_lines() {
+        use nbformat::v4::MultilineString;
+
+        // "hello\n" should serialize as ["hello\n"], not ["hello\n\n"]
+        let ms = MultilineString("hello\n".to_string());
+        let serialized: Vec<String> = serde_json::from_str(
+            &serde_json::to_string(&ms).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(serialized, vec!["hello\n"]);
+
+        // "hello" (no trailing newline) should serialize as ["hello"]
+        let ms = MultilineString("hello".to_string());
+        let serialized: Vec<String> = serde_json::from_str(
+            &serde_json::to_string(&ms).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(serialized, vec!["hello"]);
+
+        // Multi-line: "a\nb\n" should serialize as ["a\n", "b\n"]
+        let ms = MultilineString("a\nb\n".to_string());
+        let serialized: Vec<String> = serde_json::from_str(
+            &serde_json::to_string(&ms).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(serialized, vec!["a\n", "b\n"]);
+
+        // Multi-line without trailing: "a\nb" should serialize as ["a\n", "b"]
+        let ms = MultilineString("a\nb".to_string());
+        let serialized: Vec<String> = serde_json::from_str(
+            &serde_json::to_string(&ms).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(serialized, vec!["a\n", "b"]);
     }
 }
