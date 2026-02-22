@@ -2,7 +2,7 @@
 mod test {
     use nbformat::legacy::Cell as LegacyCell;
     use nbformat::v4::{Cell, CellId, Output};
-    use nbformat::{parse_notebook, serialize_notebook, Notebook};
+    use nbformat::{Notebook, parse_notebook, serialize_notebook};
     use serde_json::Value;
     use std::fs;
     use std::path::Path;
@@ -141,6 +141,9 @@ mod test {
                 let notebook = parse_notebook(&notebook_json);
 
                 println!("Parsing notebook: {}", path_str);
+                if let Err(ref e) = notebook {
+                    println!("Error for {}: {:?}", path_str, e);
+                }
                 if path_str.contains("invalid_cell_id") || path_str.contains("invalid_metadata") {
                     assert!(
                         matches!(notebook, Err(nbformat::NotebookError::JsonError(_))),
@@ -148,7 +151,6 @@ mod test {
                         path_str
                     );
                 } else if path_str.starts_with("tests/notebooks/test2")
-                    || path_str.starts_with("tests/notebooks/test3")
                     || path_str.starts_with("tests/notebooks/test4plus")
                     || path_str.starts_with("tests/notebooks/invalid")
                     || path_str.starts_with("tests/notebooks/no_min_version")
@@ -471,6 +473,7 @@ mod test {
                 }
             }
             Notebook::Legacy(_) => panic!("Expected V4 notebook, got legacy"),
+            Notebook::V3(_) => panic!("Expected V4 notebook, got v3"),
         }
 
         let serialized = serialize_notebook(&notebook).expect("Failed to serialize notebook");
@@ -624,8 +627,171 @@ mod test {
                 }
             }
             Notebook::Legacy(_) => panic!("Expected V4 notebook, got legacy"),
+            Notebook::V3(_) => panic!("Expected V4 notebook, got v3"),
         }
     }
+
+    // V3 upconversion tests <-> mirrors Python nbformat's own test suite.
+
+    fn parse_v3_and_upgrade(path: &str) -> nbformat::v4::Notebook {
+        let json = read_notebook(path);
+        let notebook = parse_notebook(&json)
+            .unwrap_or_else(|e| panic!("Failed to parse {}: {:?}", path, e));
+        match notebook {
+            Notebook::V3(v3) => nbformat::upgrade_v3_notebook(v3)
+                .unwrap_or_else(|e| panic!("Failed to upgrade {}: {:?}", path, e)),
+            other => panic!("Expected V3 notebook from {}, got {:?}", path, other),
+        }
+    }
+
+    fn has_media_type(
+        media: &jupyter_protocol::media::Media,
+        pred: fn(&jupyter_protocol::media::MediaType) -> bool,
+    ) -> bool {
+        media.content.iter().any(pred)
+    }
+
+    /// Checks that every output type and
+    /// every media key from _mime_map survives the v3->v4 upgrade.
+    #[test]
+    fn test_upgrade_v3_notebook() {
+        let v4 = parse_v3_and_upgrade("tests/notebooks/test3_alloutputs.ipynb");
+
+        // nb0 has 2 worksheets (6 cells + 0 cells) -> must be flattened
+        assert_eq!(v4.cells.len(), 6);
+        assert_eq!(v4.nbformat, 4);
+        assert_eq!(v4.nbformat_minor, 5);
+
+        // cell[3] heading(h2) -> markdown
+        if let Cell::Markdown { source, .. } = &v4.cells[3] {
+            assert_eq!(source.as_slice(), ["## My Heading"]);
+        } else {
+            panic!("Expected markdown from h2 heading, got {:?}", v4.cells[3]);
+        }
+
+        // cell[5] is the all-outputs code cell: pyout, display_data, pyerr, stream x2
+        if let Cell::Code { outputs, execution_count, .. } = &v4.cells[5] {
+            assert_eq!(execution_count, &Some(3));
+            assert_eq!(outputs.len(), 5);
+
+            // pyout -> ExecuteResult with all _mime_map keys
+            let result = if let Output::ExecuteResult(r) = &outputs[0] { r }
+                else { panic!("Expected ExecuteResult, got {:?}", outputs[0]) };
+            assert_eq!(result.execution_count.value(), 3);
+            for (check, label) in [
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Plain(_))),      "text->Plain"),
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Html(_))),       "html->Html"),
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Svg(_))),        "svg->Svg"),
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Png(_))),        "png->Png"),
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Jpeg(_))),       "jpeg->Jpeg"),
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Latex(_))),      "latex->Latex"),
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Javascript(_))), "javascript->Javascript"),
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Json(_))),       "json->Json"),
+            ] {
+                assert!(check, "pyout {label} missing in ExecuteResult");
+            }
+
+            let json_val = result.data.content.iter().find_map(|mt| {
+                if let jupyter_protocol::media::MediaType::Json(v) = mt { Some(v) } else { None }
+            });
+            assert!(
+                json_val.map(|v| v.is_object()).unwrap_or(false),
+                "pyout json field should be parsed into a JSON object, got {:?}", json_val
+            );
+
+            // display_data with same flat media keys
+            let dd = if let Output::DisplayData(d) = &outputs[1] { d }
+                else { panic!("Expected DisplayData, got {:?}", outputs[1]) };
+            for (check, label) in [
+                (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Plain(_))),      "text->Plain"),
+                (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Html(_))),       "html->Html"),
+                (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Png(_))),        "png->Png"),
+                (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Javascript(_))), "javascript->Javascript"),
+                (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Json(_))),       "json->Json"),
+            ] {
+                assert!(check, "display_data {label} missing");
+            }
+
+            // pyerr -> Error
+            if let Output::Error(err) = &outputs[2] {
+                assert_eq!(err.ename, "NameError");
+                assert_eq!(err.evalue, "NameError was here");
+                assert_eq!(err.traceback, vec!["frame 0", "frame 1", "frame 2"]);
+            } else {
+                panic!("Expected Error, got {:?}", outputs[2]);
+            }
+
+            // stream: stdout then stderr (Python: name = output.pop("stream", "stdout"))
+            if let Output::Stream { name, text } = &outputs[3] {
+                assert_eq!(name, "stdout");
+                assert_eq!(text.0, "foo\rbar\r\n");
+            } else {
+                panic!("Expected stdout stream, got {:?}", outputs[3]);
+            }
+            if let Output::Stream { name, .. } = &outputs[4] {
+                assert_eq!(name, "stderr");
+            } else {
+                panic!("Expected stderr stream, got {:?}", outputs[4]);
+            }
+        } else {
+            panic!("Expected code cell at index 5");
+        }
+    }
+
+    #[test]
+    fn test_upgrade_v3_heading() {
+        // test3.ipynb layout: heading(h1), markdown, heading(h2), code,
+        //                     heading(h2), code, code, heading(h3), code
+        let v4 = parse_v3_and_upgrade("tests/notebooks/test3.ipynb");
+
+        if let Cell::Markdown { source, .. } = &v4.cells[0] {
+            assert_eq!(source.as_slice(), ["# nbconvert latex test"]);
+        } else {
+            panic!("Expected h1 markdown, got {:?}", v4.cells[0]);
+        }
+        if let Cell::Markdown { source, .. } = &v4.cells[2] {
+            assert_eq!(source.as_slice(), ["## Printed Using Python"]);
+        } else {
+            panic!("Expected h2 markdown, got {:?}", v4.cells[2]);
+        }
+        if let Cell::Markdown { source, .. } = &v4.cells[7] {
+            assert_eq!(source.as_slice(), ["### Image"]);
+        } else {
+            panic!("Expected h3 markdown, got {:?}", v4.cells[7]);
+        }
+    }
+
+    /// no-worksheets, missing prompt_number, missing metadata.
+    #[test]
+    fn test_upgrade_v3_edge_cases() {
+        // no worksheets key -> empty cells
+        let v4 = parse_v3_and_upgrade("tests/notebooks/test3_no_worksheets.ipynb");
+        assert!(v4.cells.is_empty());
+
+        // worksheet present but no cells -> empty cells
+        let v4 = parse_v3_and_upgrade("tests/notebooks/test3_worksheet_with_no_cells.ipynb");
+        assert!(v4.cells.is_empty());
+
+        // no metadata -> no kernelspec, no language_info
+        let v4 = parse_v3_and_upgrade("tests/notebooks/test3_no_metadata.ipynb");
+        assert!(v4.metadata.kernelspec.is_none());
+        assert!(v4.metadata.language_info.is_none());
+
+        // missing prompt_number -> cell execution_count is None
+        let json = r#"{"nbformat":3,"nbformat_minor":0,"metadata":{},
+            "worksheets":[{"cells":[{"cell_type":"code","metadata":{},
+            "input":["x = 1"],"language":"python","outputs":[]}]}]}"#;
+        let nb = parse_notebook(json).expect("parse failed");
+        let v3 = if let Notebook::V3(v3) = nb { v3 } else { panic!() };
+        let v4 = nbformat::upgrade_v3_notebook(v3).expect("upgrade failed");
+        if let Cell::Code { execution_count, .. } = &v4.cells[0] {
+            assert_eq!(*execution_count, None);
+        } else {
+            panic!("Expected code cell");
+        }
+    }
+
+
 
     #[test]
     fn test_parse_notebook_with_mixed_source_formats() {
@@ -670,22 +836,23 @@ mod test {
                 if let Cell::Markdown { source, .. } = &notebook.cells[0] {
                     assert_eq!(
                         source,
-                        &vec!["# Array format\n".to_string(), "This is the array format.".to_string()]
+                        &vec![
+                            "# Array format\n".to_string(),
+                            "This is the array format.".to_string()
+                        ]
                     );
                 } else {
                     panic!("Expected markdown cell");
                 }
 
                 if let Cell::Code { source, .. } = &notebook.cells[1] {
-                    assert_eq!(
-                        source,
-                        &vec!["# String format\nprint('hello')".to_string()]
-                    );
+                    assert_eq!(source, &vec!["# String format\nprint('hello')".to_string()]);
                 } else {
                     panic!("Expected code cell");
                 }
             }
             Notebook::Legacy(_) => panic!("Expected V4 notebook, got legacy"),
+            Notebook::V3(_) => panic!("Expected V4 notebook, got v3"),
         }
     }
 
