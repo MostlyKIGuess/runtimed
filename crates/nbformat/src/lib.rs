@@ -249,6 +249,33 @@ fn convert_v3_metadata(v3_metadata: Option<&serde_json::Value>) -> v4::Metadata 
     metadata
 }
 
+fn map_v3_media_fields(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    skip_keys: &[&str],
+) -> Vec<jupyter_protocol::media::MediaType> {
+    fields
+        .iter()
+        .filter(|(k, _)| !skip_keys.contains(&k.as_str()))
+        .filter_map(|(k, v)| {
+            let content = v3::join_media_value(v)?;
+            let media_type = match k.as_str() {
+                "text" => jupyter_protocol::media::MediaType::Plain(content),
+                "html" => jupyter_protocol::media::MediaType::Html(content),
+                "png" => jupyter_protocol::media::MediaType::Png(content),
+                "jpeg" => jupyter_protocol::media::MediaType::Jpeg(content),
+                "svg" => jupyter_protocol::media::MediaType::Svg(content),
+                "latex" => jupyter_protocol::media::MediaType::Latex(content),
+                "javascript" => jupyter_protocol::media::MediaType::Javascript(content),
+                _ => jupyter_protocol::media::MediaType::Other((
+                    k.clone(),
+                    serde_json::Value::String(content),
+                )),
+            };
+            Some(media_type)
+        })
+        .collect()
+}
+
 fn convert_v3_output(v3_output: v3::Output) -> v4::Output {
     match v3_output {
         v3::Output::Stream { name, stream, text } => v4::Output::Stream {
@@ -257,57 +284,32 @@ fn convert_v3_output(v3_output: v3::Output) -> v4::Output {
         },
         v3::Output::PyOut {
             prompt_number,
-            text,
-            html,
-            metadata: _,
+            metadata,
+            extra_fields,
         } => {
-            let mut data = Vec::new();
-            if !text.is_empty() {
-                data.push(jupyter_protocol::media::MediaType::Plain(text.join("")));
-            }
-            if let Some(html) = html {
-                if !html.is_empty() {
-                    data.push(jupyter_protocol::media::MediaType::Html(html.join("")));
-                }
-            }
+            let data = map_v3_media_fields(&extra_fields, &["output_type"]);
+
+            let metadata = match metadata {
+                serde_json::Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
+            let execution_count = jupyter_protocol::ExecutionCount::new(
+                prompt_number.unwrap_or(0).max(0) as usize,
+            );
             v4::Output::ExecuteResult(v4::ExecuteResult {
-                execution_count: jupyter_protocol::ExecutionCount::new(
-                    prompt_number.unwrap_or(1) as usize
-                ),
+                execution_count,
                 data: jupyter_protocol::media::Media::new(data),
-                metadata: serde_json::Map::new(),
+                metadata,
             })
         }
-        v3::Output::DisplayData { data, metadata: _ } => {
-            let media_vec = if let Some(obj) = data.as_object() {
-                obj.iter()
-                    .filter_map(|(k, v)| {
-                        // v3 data values are either a plain string or an array of strings;
-                        // join all lines rather than taking only the first element.
-                        let content = match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            serde_json::Value::Array(arr) => arr
-                                .iter()
-                                .filter_map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .join(""),
-                            _ => return None,
-                        };
-                        let media_type = match k.as_str() {
-                            "png" => jupyter_protocol::media::MediaType::Png(content),
-                            "jpeg" => jupyter_protocol::media::MediaType::Jpeg(content),
-                            "text" => jupyter_protocol::media::MediaType::Plain(content),
-                            _ => jupyter_protocol::media::MediaType::Other((
-                                k.clone(),
-                                serde_json::Value::String(content),
-                            )),
-                        };
-                        Some(media_type)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        v3::Output::DisplayData {
+            metadata: _,
+            extra_fields,
+        } => {
+            // v3 display_data also stores media as flat top-level keys. Skip the
+            // structural fields that are not media.
+            let media_vec =
+                map_v3_media_fields(&extra_fields, &["output_type", "metadata"]);
             v4::Output::DisplayData(v4::DisplayData {
                 data: jupyter_protocol::media::Media::new(media_vec),
                 metadata: serde_json::Map::new(),
