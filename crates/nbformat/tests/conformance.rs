@@ -686,9 +686,18 @@ mod test {
                 (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Jpeg(_))),       "jpeg->Jpeg"),
                 (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Latex(_))),      "latex->Latex"),
                 (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Javascript(_))), "javascript->Javascript"),
+                (has_media_type(&result.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Json(_))),       "json->Json"),
             ] {
                 assert!(check, "pyout {label} missing in ExecuteResult");
             }
+
+            let json_val = result.data.content.iter().find_map(|mt| {
+                if let jupyter_protocol::media::MediaType::Json(v) = mt { Some(v) } else { None }
+            });
+            assert!(
+                json_val.map(|v| v.is_object()).unwrap_or(false),
+                "pyout json field should be parsed into a JSON object, got {:?}", json_val
+            );
 
             // display_data with same flat media keys
             let dd = if let Output::DisplayData(d) = &outputs[1] { d }
@@ -698,6 +707,7 @@ mod test {
                 (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Html(_))),       "html->Html"),
                 (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Png(_))),        "png->Png"),
                 (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Javascript(_))), "javascript->Javascript"),
+                (has_media_type(&dd.data, |mt| matches!(mt, jupyter_protocol::media::MediaType::Json(_))),       "json->Json"),
             ] {
                 assert!(check, "display_data {label} missing");
             }

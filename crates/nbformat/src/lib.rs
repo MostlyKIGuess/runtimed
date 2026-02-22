@@ -266,6 +266,11 @@ fn map_v3_media_fields(
                 "svg" => jupyter_protocol::media::MediaType::Svg(content),
                 "latex" => jupyter_protocol::media::MediaType::Latex(content),
                 "javascript" => jupyter_protocol::media::MediaType::Javascript(content),
+                "json" => {
+                    let parsed = serde_json::from_str(&content)
+                        .unwrap_or(serde_json::Value::String(content));
+                    return Some(jupyter_protocol::media::MediaType::Json(parsed));
+                }
                 _ => jupyter_protocol::media::MediaType::Other((
                     k.clone(),
                     serde_json::Value::String(content),
