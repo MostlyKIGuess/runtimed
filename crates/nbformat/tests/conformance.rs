@@ -648,7 +648,7 @@ mod test {
         media: &jupyter_protocol::media::Media,
         pred: fn(&jupyter_protocol::media::MediaType) -> bool,
     ) -> bool {
-        media.content.iter().any(|mt| pred(mt))
+        media.content.iter().any(pred)
     }
 
     /// Checks that every output type and
