@@ -42,13 +42,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-At present, this crate supports v4.5 notebooks via `Notebook::V4` and v4.1-v4.4 via `Notebook::Legacy`. v4.5 have some more hard constraints on CellIDs being required, only allowing certain characters, and not having duplicates. Converting from a v4.1-v4.4 notebook to a v4.5 notebook requires modifying the notebook to include Cell IDs.
+At present, this crate supports v4.5 notebooks via `Notebook::V4`, v4.1-v4.4 via `Notebook::Legacy` and v3 via `Notebook::V3`. v4.5 have some more hard constraints on CellIDs being required, only allowing certain characters, and not having duplicates. Converting from a v4.1-v4.4 notebook to a v4.5 notebook requires modifying the notebook to include Cell IDs.
 
 
 ## ROADMAP
 
 * [x] Serialize and Deserialize v4.1-v4.5 notebooks into rust structures
 * [x] Test operations on a suite of notebooks from Python nbformat
-* [ ] Add support for upconverting v3 notebooks to v4
+* [x] Add support for upconverting v3 notebooks to v4
 * [x] Add support for upconverting v4.1-v4.4 notebooks to v4.5
 * [x] Break out types to be shared between runtimelib's Media setup and the notebook crate
+* [ ] Add support for v2 and v1 notebook upconversion
