@@ -1,6 +1,6 @@
 [package]
 name = "jupyter-protocol"
-version = "1.2.2"
+version = "1.3.0"
 edition = "2021"
 description = "Jupyter messaging structures and traits for jupyter clients and servers"
 repository = "https://github.com/runtimed/runtimed"
