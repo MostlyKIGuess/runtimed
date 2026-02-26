@@ -1044,9 +1044,16 @@ pub struct KernelInfoRequest {}
 pub struct KernelInfoReply {
     pub status: ReplyStatus,
     pub protocol_version: String,
+    /// Kernel implementation name (e.g., "ipykernel", "IRkernel").
+    /// Some kernels may not provide this field.
+    #[serde(default)]
     pub implementation: String,
+    /// Version of the kernel implementation.
+    /// Some kernels may not provide this field.
+    #[serde(default)]
     pub implementation_version: String,
     pub language_info: LanguageInfo,
+    #[serde(default)]
     pub banner: String,
     #[serde(default)]
     pub help_links: Vec<HelpLink>,
@@ -1673,13 +1680,24 @@ impl Default for InspectRequest {
     }
 }
 
+/// Deserialize a field that might be null as its default value
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InspectReply {
     #[serde(default)]
     pub found: bool,
-    #[serde(default)]
+    /// Some kernels return null for data when inspection is not found
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub data: Media,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub metadata: serde_json::Map<String, Value>,
     #[serde(default)]
     pub status: ReplyStatus,
